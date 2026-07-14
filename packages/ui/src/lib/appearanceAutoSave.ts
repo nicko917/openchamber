@@ -6,7 +6,11 @@ import type { MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 
 type AppearanceSlice = {
   showReasoningTraces: boolean;
-  sessionAssistEnabled: boolean;
+  sessionRecapEnabled: boolean;
+  sessionSuggestionEnabled: boolean;
+  sessionGoalEnabled: boolean;
+  sessionGoalDefaultBudgetEnabled: boolean;
+  sessionGoalDefaultBudget: number;
   collapsibleThinkingBlocks: boolean;
   showDeletionDialog: boolean;
   nativeNotificationsEnabled: boolean;
@@ -30,6 +34,7 @@ type AppearanceSlice = {
   sessionRetentionAction: 'archive' | 'delete';
   fontSize: number;
   terminalFontSize: number;
+  editorFontSize: number;
   uiFont: UiFontOption;
   monoFont: MonoFontOption;
   padding: number;
@@ -51,7 +56,11 @@ export const startAppearanceAutoSave = (): void => {
 
   let previous: AppearanceSlice = {
     showReasoningTraces: useUIStore.getState().showReasoningTraces,
-    sessionAssistEnabled: useUIStore.getState().sessionAssistEnabled,
+    sessionRecapEnabled: useUIStore.getState().sessionRecapEnabled,
+    sessionSuggestionEnabled: useUIStore.getState().sessionSuggestionEnabled,
+    sessionGoalEnabled: useUIStore.getState().sessionGoalEnabled,
+    sessionGoalDefaultBudgetEnabled: useUIStore.getState().sessionGoalDefaultBudgetEnabled,
+    sessionGoalDefaultBudget: useUIStore.getState().sessionGoalDefaultBudget,
     collapsibleThinkingBlocks: useUIStore.getState().collapsibleThinkingBlocks,
     showDeletionDialog: useUIStore.getState().showDeletionDialog,
     nativeNotificationsEnabled: useUIStore.getState().nativeNotificationsEnabled,
@@ -70,6 +79,7 @@ export const startAppearanceAutoSave = (): void => {
     sessionRetentionAction: useUIStore.getState().sessionRetentionAction,
     fontSize: useUIStore.getState().fontSize,
     terminalFontSize: useUIStore.getState().terminalFontSize,
+    editorFontSize: useUIStore.getState().editorFontSize,
     uiFont: useUIStore.getState().uiFont,
     monoFont: useUIStore.getState().monoFont,
     padding: useUIStore.getState().padding,
@@ -103,7 +113,11 @@ export const startAppearanceAutoSave = (): void => {
   useUIStore.subscribe((state) => {
     const current: AppearanceSlice = {
       showReasoningTraces: state.showReasoningTraces,
-      sessionAssistEnabled: state.sessionAssistEnabled,
+      sessionRecapEnabled: state.sessionRecapEnabled,
+      sessionSuggestionEnabled: state.sessionSuggestionEnabled,
+      sessionGoalEnabled: state.sessionGoalEnabled,
+      sessionGoalDefaultBudgetEnabled: state.sessionGoalDefaultBudgetEnabled,
+      sessionGoalDefaultBudget: state.sessionGoalDefaultBudget,
       collapsibleThinkingBlocks: state.collapsibleThinkingBlocks,
       showDeletionDialog: state.showDeletionDialog,
       nativeNotificationsEnabled: state.nativeNotificationsEnabled,
@@ -122,6 +136,7 @@ export const startAppearanceAutoSave = (): void => {
       sessionRetentionAction: state.sessionRetentionAction,
       fontSize: state.fontSize,
       terminalFontSize: state.terminalFontSize,
+      editorFontSize: state.editorFontSize,
       uiFont: state.uiFont,
       monoFont: state.monoFont,
       padding: state.padding,
@@ -137,8 +152,20 @@ export const startAppearanceAutoSave = (): void => {
     if (current.showReasoningTraces !== previous.showReasoningTraces) {
       diff.showReasoningTraces = current.showReasoningTraces;
     }
-    if (current.sessionAssistEnabled !== previous.sessionAssistEnabled) {
-      diff.sessionAssistEnabled = current.sessionAssistEnabled;
+    if (current.sessionRecapEnabled !== previous.sessionRecapEnabled) {
+      diff.sessionRecapEnabled = current.sessionRecapEnabled;
+    }
+    if (current.sessionSuggestionEnabled !== previous.sessionSuggestionEnabled) {
+      diff.sessionSuggestionEnabled = current.sessionSuggestionEnabled;
+    }
+    if (current.sessionGoalEnabled !== previous.sessionGoalEnabled) {
+      diff.sessionGoalEnabled = current.sessionGoalEnabled;
+    }
+    if (current.sessionGoalDefaultBudgetEnabled !== previous.sessionGoalDefaultBudgetEnabled) {
+      diff.sessionGoalDefaultBudgetEnabled = current.sessionGoalDefaultBudgetEnabled;
+    }
+    if (current.sessionGoalDefaultBudget !== previous.sessionGoalDefaultBudget) {
+      diff.sessionGoalDefaultBudget = current.sessionGoalDefaultBudget;
     }
     if (current.collapsibleThinkingBlocks !== previous.collapsibleThinkingBlocks) {
       diff.collapsibleThinkingBlocks = current.collapsibleThinkingBlocks;
@@ -193,6 +220,9 @@ export const startAppearanceAutoSave = (): void => {
     }
     if (current.terminalFontSize !== previous.terminalFontSize) {
       diff.terminalFontSize = current.terminalFontSize;
+    }
+    if (current.editorFontSize !== previous.editorFontSize) {
+      diff.editorFontSize = current.editorFontSize;
     }
     if (current.uiFont !== previous.uiFont) {
       diff.uiFont = current.uiFont;
