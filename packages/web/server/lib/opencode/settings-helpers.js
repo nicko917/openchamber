@@ -1,3 +1,5 @@
+import { isAgentMemoryFeatureAvailable } from '../agent-memory/feature-flag.js';
+
 export const createSettingsHelpers = (dependencies) => {
   const {
     normalizePathForPersistence,
@@ -176,6 +178,16 @@ export const createSettingsHelpers = (dependencies) => {
       const normalized = normalizeDirectoryPath(candidate.opencodeBinary).trim();
       result.opencodeBinary = normalized;
     }
+    if (typeof candidate.workStatusPanelEnabled === 'boolean') {
+      result.workStatusPanelEnabled = candidate.workStatusPanelEnabled;
+    }
+    if (Array.isArray(candidate.workStatusHiddenSections)) {
+      // Ids are validated on the client, which owns the section list; here we
+      // only guarantee the shape, so a malformed payload cannot land on disk.
+      result.workStatusHiddenSections = [
+        ...new Set(candidate.workStatusHiddenSections.filter((entry) => typeof entry === 'string' && entry.length > 0)),
+      ];
+    }
     if (typeof candidate.desktopLanAccessEnabled === 'boolean') {
       result.desktopLanAccessEnabled = candidate.desktopLanAccessEnabled;
     }
@@ -352,17 +364,8 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.maxLastMessageLength === 'number' && Number.isFinite(candidate.maxLastMessageLength)) {
       result.maxLastMessageLength = Math.max(10, Math.round(candidate.maxLastMessageLength));
     }
-    if (typeof candidate.usageAutoRefresh === 'boolean') {
-      result.usageAutoRefresh = candidate.usageAutoRefresh;
-    }
-    if (typeof candidate.usageRefreshIntervalMs === 'number' && Number.isFinite(candidate.usageRefreshIntervalMs)) {
-      result.usageRefreshIntervalMs = Math.max(30000, Math.min(300000, Math.round(candidate.usageRefreshIntervalMs)));
-    }
     if (candidate.usageDisplayMode === 'usage' || candidate.usageDisplayMode === 'remaining') {
       result.usageDisplayMode = candidate.usageDisplayMode;
-    }
-    if (typeof candidate.usageShowPredValues === 'boolean') {
-      result.usageShowPredValues = candidate.usageShowPredValues;
     }
     if (Array.isArray(candidate.usageDropdownProviders)) {
       result.usageDropdownProviders = normalizeStringArray(candidate.usageDropdownProviders);
@@ -373,6 +376,9 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.autoDeleteAfterDays === 'number' && Number.isFinite(candidate.autoDeleteAfterDays)) {
       const normalizedDays = Math.max(1, Math.min(365, Math.round(candidate.autoDeleteAfterDays)));
       result.autoDeleteAfterDays = normalizedDays;
+    }
+    if (candidate.sessionRetentionAction === 'archive' || candidate.sessionRetentionAction === 'delete') {
+      result.sessionRetentionAction = candidate.sessionRetentionAction;
     }
     if (candidate.tunnelBootstrapTtlMs === null) {
       result.tunnelBootstrapTtlMs = null;
@@ -443,6 +449,10 @@ export const createSettingsHelpers = (dependencies) => {
       const trimmed = candidate.smallModelOverride.trim();
       result.smallModelOverride = trimmed.length > 0 ? trimmed : undefined;
     }
+    if (typeof candidate.walkthroughModelOverride === 'string') {
+      const trimmed = candidate.walkthroughModelOverride.trim();
+      result.walkthroughModelOverride = trimmed.length > 0 ? trimmed : undefined;
+    }
     if (typeof candidate.defaultGitIdentityId === 'string') {
       const trimmed = candidate.defaultGitIdentityId.trim();
       result.defaultGitIdentityId = trimmed.length > 0 ? trimmed : undefined;
@@ -497,8 +507,14 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.showOpenCodeUpdateNotifications === 'boolean') {
       result.showOpenCodeUpdateNotifications = candidate.showOpenCodeUpdateNotifications;
     }
+    if (typeof candidate.agentWebToolEnabled === 'boolean') {
+      result.agentWebToolEnabled = candidate.agentWebToolEnabled;
+    }
     if (typeof candidate.agentControlToolEnabled === 'boolean') {
       result.agentControlToolEnabled = candidate.agentControlToolEnabled;
+    }
+    if (typeof candidate.agentMemoryToolEnabled === 'boolean') {
+      result.agentMemoryToolEnabled = candidate.agentMemoryToolEnabled;
     }
     if (typeof candidate.optimizeSystemPrompt === 'boolean') {
       result.optimizeSystemPrompt = candidate.optimizeSystemPrompt;
@@ -560,6 +576,9 @@ export const createSettingsHelpers = (dependencies) => {
       if (mode === 'markdown' || mode === 'plain') {
         result.userMessageRenderingMode = mode;
       }
+    }
+    if (typeof candidate.collapsibleUserMessages === 'boolean') {
+      result.collapsibleUserMessages = candidate.collapsibleUserMessages;
     }
     if (typeof candidate.stickyUserHeader === 'boolean') {
       result.stickyUserHeader = candidate.stickyUserHeader;
@@ -894,6 +913,9 @@ export const createSettingsHelpers = (dependencies) => {
     return {
       ...sanitized,
       hasManagedRemoteTunnelToken,
+      // Tells the client whether agent memory exists in this build at all, so
+      // its settings row and panel tab can be absent rather than merely off.
+      agentMemoryFeatureAvailable: isAgentMemoryFeatureAvailable(),
       ...(pwaAppName ? { pwaAppName } : {}),
       pwaOrientation,
       mobileKeyboardMode,

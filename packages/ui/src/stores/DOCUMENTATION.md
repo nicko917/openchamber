@@ -40,6 +40,16 @@ Examples:
 
 These stores coordinate visible app state, navigation, selected tabs, dialogs, and lightweight feature flags.
 
+Context-panel session chats mount only the active chat iframe. After installing
+its message listener, the iframe requests its authoritative visibility from the
+parent. The parent accepts requests only from a currently mounted chat frame and
+answers from the current active tab. Do not rely only on a parent `onLoad`
+notification: it can arrive before the iframe listener exists and leave a
+visible chat with background work disabled. Message-history subscriptions in the
+mounted session-chat iframe stay enabled independently of that visibility flag
+so a delayed or lost handshake cannot hide an already-materialized transcript
+(busy subagents would otherwise show only the working-status row).
+
 ### Session / project coordination stores
 
 Examples:
@@ -47,8 +57,14 @@ Examples:
 - `useProjectsStore.ts`
 - `useGlobalSessionsStore.ts`
 - `useSessionFoldersStore.ts`
+- `useProjectContextStore.ts`
+- `messageQueueStore.ts`
 
 These stores coordinate persistent project/session metadata across multiple views.
+
+`useProjectContextStore.ts` caches server-owned project notes, todos, and plan links, keyed by the path-derived project id. It replaced a pair of `window` CustomEvents that made every mounted notes panel re-read the whole project config. Writes are optimistic and roll back on failure; they are serialized per project, because the server's own store does a read-modify-write and two concurrent saves would otherwise race it. A load that resolves while a write is in flight keeps the local value for that field group only, so a slow snapshot cannot undo newer typing while still delivering the plan list it fetched. A failed load sets `error` and preserves the cached snapshot — an unreachable server must never render as "this project has no notes". Note and plan creation are deliberately not optimistic, since ids and timestamps are assigned by the server. Notes, todos, and plans are written through separate routes and tracked by separate in-flight flags, so a todo toggle cannot clobber a note edit in the same window. Pinned notes and plans are assembled into a synthetic context part by `lib/projectContextPinning.ts` at send time; that module tracks per-session what it already sent so an unchanged pinned set is not re-sent every turn.
+
+`messageQueueStore.ts` keeps a queued message until its own send resolves, so between dispatch and resolution the entry is still visible to every reader. Dispatchers must therefore mark the send (`markSending`/`clearSending`) and read `getSendableQueue()` — or filter `sendingIds` themselves — instead of dispatching straight from `queuedMessages`; otherwise a composer submit merges a message the auto-send hook is already delivering and it is sent twice (the window is seconds over a relay). `clearQueue()` retains in-flight entries for the same reason. `sendingIds` is deliberately not persisted: a restart has no in-flight sends, and a stale flag would strand a queued message.
 
 `useGlobalSessionsStore.ts` owns cold/global active and archived session coverage, including `sessionsByDirectory`. It is complementary to directory child stores: it is not the source of live busy/retry status or session messages.
 
@@ -56,7 +72,8 @@ User-visible session ordering is also not owned by the global cache array order.
 
 Global refresh rules:
 
-- Per-directory refresh is bounded to two requests across callers and prioritizes the current directory.
+- The OpenCode `archived` list flag means "also include archived sessions": the server only drops its `time_archived IS NULL` condition. The global cache therefore loads with one inclusive request (`archived: true`) and splits active/archived client-side via `splitGlobalSessionsByArchived` — an `archived: false` request cannot be truthful because the server filter excludes restored sessions (`time.archived` falsy-but-present, see "Restore (unarchive) contract" in `sync/DOCUMENTATION.md`). For callers that still want only archived records, `listGlobalSessionPages` narrows inclusive responses at the data boundary (default `narrowToArchived`), so the archived cache never holds active sessions and no consumer has to re-derive that. Pagination progress stays measured on the raw response, so a page that is full upstream but filtered out here is not mistaken for the last page.
+- Per-directory refresh issues one inclusive request per directory (previously two), bounded to two requests across callers and prioritizing the current directory.
 - Each directory is an independent completeness scope. A failed directory preserves its previous sessions while successful directories reconcile normally.
 - Fetch failure must remain distinguishable from a successful empty list; failed scopes cannot destructively clear cached sessions.
 - Runtime switch increments the load generation and clears the previous runtime's snapshot so stale in-flight work cannot commit.
@@ -159,6 +176,10 @@ Important properties:
 - `refreshTargets()` supports one-shot multi-target bootstrap without turning on live watching
 - runtime reset disposes timers, watchers, API references, and request ownership while inert namespaced snapshots remain isolated
 - persisted cache is versioned, TTL-filtered, and bounded for page refresh continuity, not broad background syncing
+- a closed/merged PR is the branch's history, not live status: it is displayed and persisted, but never treated as authority
+- closed/merged associations use the same `5m` discovery cadence as missing PRs so a newer open PR (or authoritative `pr: null`) replaces them without a manual refresh
+- hydrate restores a persisted closed/merged PR but resets its `lastDiscoveryPollAt`, so revalidation runs on the first watcher tick after a reload
+- a successful refresh that returns `pr: null` replaces any previously cached PR authoritatively; a failed refresh keeps the previous one
 
 ## Ownership Rules
 
@@ -185,7 +206,6 @@ Good:
 - `useGitBranches(directory)`
 - `useGitBranchLabel(directory)`
 - `useGitRepoStatusMap(directories)`
-- `usePrVisualSummaryByKeys(keys)`
 
 Bad:
 
@@ -251,7 +271,10 @@ Expected model:
 
 - `GitView` / `DiffView` ensure current-directory Git state when visible
 - explicit Git actions refresh status/branches/log as needed
-- successful file-mutating tools can issue a one-shot Git refresh hint
+- a mounted file-mutating tool issues a one-shot Git refresh hint when it transitions from active to successfully finalized; remounting historical completed tools does not replay the hint
+- a successful dirty save from the in-app file editor issues a path-scoped Git refresh hint; clean autosave checks remain no-ops
+- refresh hints with authoritative file paths invalidate only those cached and currently rendered diffs before status refresh; pathless tools request status reconciliation without broadly remounting DiffView
+- targeted diff remounts preserve the user's current file-section anchor and intra-file offset before paint instead of resetting the stacked view to the top
 - no root-level background Git polling
 
 ### PR

@@ -146,6 +146,17 @@ export interface GetGitDiffOptions {
   contextLines?: number;
 }
 
+/**
+ * Diff between two refs. Uses three-dot (`base...head`) semantics server-side, so changes
+ * pulled into `head` by merging `base` are excluded — only the branch's own work is returned.
+ */
+export interface GetGitRangeDiffOptions {
+  base: string;
+  head: string;
+  path?: string;
+  contextLines?: number;
+}
+
 export interface GitFileDiffResponse {
   original: string;
   modified: string;
@@ -172,6 +183,7 @@ export interface GitBranch {
   all: string[];
   current: string;
   branches: Record<string, GitBranchDetails>;
+  defaultBranches?: Record<string, string>;
 }
 
 interface GitCommitSummary {
@@ -453,6 +465,7 @@ export interface GitAPI {
   getGitStatus(directory: string, options?: { mode?: 'light' }): Promise<GitStatus>;
   getGitDiff(directory: string, options: GetGitDiffOptions): Promise<GitDiffResponse>;
   getGitFileDiff(directory: string, options: GetGitFileDiffOptions): Promise<GitFileDiffResponse>;
+  getGitRangeDiff?(directory: string, options: GetGitRangeDiffOptions): Promise<GitDiffResponse>;
   revertGitFile(directory: string, filePath: string, options?: { scope?: 'all' | 'working' }): Promise<void>;
   stageGitFile(directory: string, filePath: string): Promise<void>;
   stageGitFiles?(directory: string, filePaths: string[]): Promise<void>;
@@ -593,6 +606,7 @@ export interface FilesAPI {
   readFile?(path: string, options?: FileReadOptions): Promise<{ content: string; path: string }>;
   readFileBinary?(path: string, options?: FileReadOptions): Promise<{ dataUrl: string; path: string }>;
   writeFile?(path: string, content: string): Promise<{ success: boolean; path: string }>;
+  uploadFile?(path: string, file: Blob, options?: { overwrite?: boolean; directory?: string }): Promise<{ success: boolean; path: string }>;
   delete?(path: string): Promise<{ success: boolean }>;
   rename?(oldPath: string, newPath: string): Promise<{ success: boolean; path: string }>;
   revealPath?(path: string): Promise<{ success: boolean }>;
@@ -1344,6 +1358,11 @@ export interface SkillsInstallResponse {
   skipped?: Array<{ skillName: string; reason: string }>;
   error?: SkillsInstallError;
   requiresReload?: boolean;
+  requiresRestart?: boolean;
+  restartDeferred?: boolean;
+  requiresManualRestart?: boolean;
+  reloadFailed?: boolean;
+  warning?: string;
   message?: string;
   reloadDelayMs?: number;
 }

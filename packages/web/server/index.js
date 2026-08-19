@@ -76,6 +76,7 @@ import { createOpenCodeWatcherRuntime } from './lib/opencode/watcher.js';
 import { createSessionAssistRuntime } from './lib/session-assist/runtime.js';
 import { createSessionGoalRuntime } from './lib/session-goal/runtime.js';
 import { createContextObligatoryRuntime } from './lib/context-obligatory/runtime.js';
+import { createSessionKnowledgeRuntime } from './lib/session-knowledge/runtime.js';
 import { createScheduledTasksRuntime } from './lib/scheduled-tasks/runtime.js';
 import { createServerStartupRuntime } from './lib/opencode/server-startup-runtime.js';
 import { createTunnelWiringRuntime } from './lib/opencode/tunnel-wiring-runtime.js';
@@ -90,18 +91,27 @@ import { createNotificationTemplateRuntime } from './lib/notifications/template-
 import { createPermissionAutoAcceptRuntime } from './lib/permission-auto-accept/runtime.js';
 import { createGracefulShutdownRuntime } from './lib/opencode/shutdown-runtime.js';
 import { createProjectConfigRuntime } from './lib/projects/project-config.js';
+import { createProjectContextRuntime } from './lib/project-context/runtime.js';
+import { createAgentMemoryRuntime } from './lib/agent-memory/runtime.js';
+import { createAgentMemoryActions } from './lib/agent-memory/actions.js';
+import { createMemoryProjectResolver } from './lib/agent-memory/project-resolution.js';
+import { isAgentMemoryFeatureAvailable } from './lib/agent-memory/feature-flag.js';
+import { resolvePrimaryWorktreeRoot } from './lib/git/service.js';
 import { createRemoteClientAuthRuntime } from './lib/client-auth/remote-clients.js';
 import { createClientPairingRuntime } from './lib/client-auth/pairing.js';
-import { createPreviewProxyRuntime } from './lib/preview/proxy-runtime.js';
 import { attachRealtimeProxy } from './lib/realtime-proxy.js';
 import { createRelayService } from './lib/relay/service.js';
 import { createRelayHostLock } from './lib/relay/host-lock.js';
 import { createAgentToolRuntime } from './lib/agent-tool/runtime.js';
+import { createBrowserControlBroker } from './lib/browser-control/broker.js';
+import { createDevServerScanner } from './lib/dev-servers/routes.js';
+import { createDevTunnelRuntime } from './lib/dev-tunnel/runtime.js';
+import { registerBrowserControlRoutes } from './lib/browser-control/routes.js';
 import { createSystemPromptRuntime } from './lib/system-prompt/runtime.js';
 import { createOpenChamberSessionService } from './lib/openchamber-sessions/routes.js';
 import { createScheduledTaskService } from './lib/scheduled-tasks/service.js';
 import { createOpenChamberControlService } from './lib/openchamber-control/service.js';
-import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware';
+import { OpenChamberControlError } from './lib/openchamber-control/error.js';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -470,6 +480,34 @@ const projectConfigRuntime = createProjectConfigRuntime({
   projectsDirPath: OPENCHAMBER_PROJECTS_CONFIG_DIR,
 });
 
+const projectContextRuntime = createProjectContextRuntime({
+  fsPromises,
+  path,
+  projectsDirPath: OPENCHAMBER_PROJECTS_CONFIG_DIR,
+});
+
+const agentMemoryRuntime = createAgentMemoryRuntime({
+  fsPromises,
+  path,
+  projectsDirPath: OPENCHAMBER_PROJECTS_CONFIG_DIR,
+  userConfigRoot: OPENCHAMBER_USER_CONFIG_ROOT,
+});
+
+/**
+ * One switch for everything memory-related. It gates the tool, these routes,
+ * and the session index alike, so turning memory off leaves nothing behind
+ * that still reads or writes the store.
+ */
+const isAgentMemoryEnabled = async () => {
+  // The feature gate comes first: unreleased means absent, not merely switched
+  // off, so no stored setting can bring it back.
+  if (!isAgentMemoryFeatureAvailable()) {
+    return false;
+  }
+  const settings = await readSettingsFromDiskMigrated().catch(() => null);
+  return settings?.agentMemoryToolEnabled === true;
+};
+
 // HMR-persistent state via globalThis
 // These values survive Vite HMR reloads to prevent zombie OpenCode processes
 const hmrStateRuntime = createHmrStateRuntime({
@@ -772,9 +810,41 @@ const sessionGoalRuntime = createSessionGoalRuntime({
     });
   },
 });
+/**
+ * Owns what a session must be told about the project's knowledge. Every sender
+ * asks it — the UI over HTTP, scheduled tasks and agent-dispatched sessions in
+ * process — so the answer cannot differ between them.
+ */
+const sessionKnowledgeRuntime = createSessionKnowledgeRuntime({
+  projectContextRuntime,
+  agentMemoryRuntime,
+  // Called, not captured: the resolver is declared further down, and taking a
+  // reference here would read it before it exists.
+  resolveProjectId: (directory) => resolveMemoryProjectId(directory),
+  isAgentMemoryEnabled,
+  openCodeFetch: async (fetchPath, { directory, method = 'GET', body } = {}) => {
+    const params = new URLSearchParams();
+    if (directory) params.set('directory', directory);
+    const search = params.toString();
+    const response = await fetch(`${buildOpenCodeUrl(fetchPath, '')}${search ? `?${search}` : ''}`, {
+      method,
+      headers: {
+        Accept: 'application/json',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...getOpenCodeAuthHeaders(),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`OpenCode ${method} ${fetchPath} failed with ${response.status}`);
+    return response.json().catch(() => null);
+  },
+});
+
 const contextObligatoryRuntime = createContextObligatoryRuntime({
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
+  sessionKnowledgeRuntime,
 });
 
 const globalMessageStreamHub = createGlobalMessageStreamHub({
@@ -1079,11 +1149,29 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
     }
     return [...new Set(directories)];
   },
+  // A managed restart can move OpenCode to a NEW port (the old one may stay
+  // occupied by an orphaned process, e.g. killProcessOnPort is a no-op on
+  // Windows). Rebind the message-stream upstream readers to the current port
+  // so the UI keeps receiving events instead of staying pinned to the old
+  // process (#2638). The runtime is created later by the startup pipeline;
+  // by the time any restart runs, it is assigned.
+  onOpenCodeRestarted: () => {
+    try {
+      messageStreamRuntime?.rebindUpstream();
+    } catch (error) {
+      console.warn('Failed to rebind message stream after OpenCode restart:', error?.message ?? error);
+    }
+  },
   getManagedOpenCodeEnv: async () => {
     const settings = await readSettingsFromDiskMigrated().catch(() => null);
-    const managedEnv = settings?.agentControlToolEnabled === false
-      ? {}
-      : await (agentToolRuntime?.prepareManagedOpenCodeEnv() || {});
+    // Each capability is its own tool and its own switch; the plugin is only
+    // injected while at least one of them is on.
+    const includeControl = settings?.agentControlToolEnabled !== false;
+    const includeWeb = settings?.agentWebToolEnabled !== false;
+    const includeMemory = isAgentMemoryFeatureAvailable() && settings?.agentMemoryToolEnabled === true;
+    const managedEnv = includeControl || includeWeb || includeMemory
+      ? await (agentToolRuntime?.prepareManagedOpenCodeEnv({ includeControl, includeWeb, includeMemory }) || {})
+      : {};
     if (settings?.optimizeSystemPrompt !== true) return managedEnv;
 
     const configContent = managedEnv.OPENCODE_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT;
@@ -1119,6 +1207,7 @@ const scheduledTasksRuntime = createScheduledTasksRuntime({
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
   waitForOpenCodeReady,
+  sessionKnowledgeRuntime,
   setSessionAutoAccept: (sessionId, enabled, directory) => permissionAutoAcceptRuntime.setSessionPolicy(sessionId, enabled, directory),
   emitTaskRunEvent: (event) => {
     for (const client of uiOpenChamberEventClients) {
@@ -1160,6 +1249,37 @@ const emitSessionCreatedEvent = (event) => {
     }
   }
 };
+/**
+ * Maps a session directory onto the project whose memory it belongs to, so a
+ * session running in a worktree writes to the project the panel shows.
+ */
+const resolveMemoryProjectId = createMemoryProjectResolver({
+  listProjectPaths: async () => {
+    const settings = await readSettingsFromDiskMigrated().catch(() => null);
+    return sanitizeProjects(settings?.projects || []).map((project) => project.path);
+  },
+  resolvePrimaryWorktreeRoot,
+});
+
+/**
+ * Tells open panels that the agent changed what it remembers, so what it just
+ * stored is visible without reopening anything.
+ */
+const emitAgentMemoryChangedEvent = (event) => {
+  for (const client of uiOpenChamberEventClients) {
+    try {
+      writeSseEvent(client, {
+        type: 'openchamber:agent-memory-changed',
+        properties: {
+          scope: event.scope,
+          ...(event.projectId ? { projectId: event.projectId } : {}),
+        },
+      });
+    } catch {
+      uiOpenChamberEventClients.delete(client);
+    }
+  }
+};
 const scheduledTaskService = createScheduledTaskService({
   readSettingsFromDiskMigrated,
   sanitizeProjects,
@@ -1174,7 +1294,39 @@ const openChamberSessionService = createOpenChamberSessionService({
   getOpenCodeAuthHeaders,
   waitForOpenCodeReady,
   emitSessionCreatedEvent,
+  sessionKnowledgeRuntime,
 });
+// Browser actions are published to whichever OpenChamber clients are connected;
+// the one owning the browser panel answers. `emitRequest` returns the number of
+// clients reached so the broker can fail fast when nobody is listening.
+const browserControlBroker = createBrowserControlBroker({
+  createId: () => `browser-${crypto.randomUUID()}`,
+  emitRequest: (request) => {
+    // Opening a page only needs a panel to open it in; everything else needs a
+    // client that can actually drive one. Counting the right clients is what
+    // lets the broker say "not here" instead of timing out.
+    const needsBrowserView = request.action !== 'browser.open';
+    let delivered = 0;
+    for (const client of uiOpenChamberEventClients) {
+      if (needsBrowserView && client.openchamberBrowserCapable !== true) continue;
+      try {
+        writeSseEvent(client, {
+          type: 'openchamber:browser-control-request',
+          properties: {
+            requestId: request.requestId,
+            action: request.action,
+            parameters: request.parameters,
+          },
+        });
+        delivered += 1;
+      } catch {
+        uiOpenChamberEventClients.delete(client);
+      }
+    }
+    return delivered;
+  },
+});
+
 const openChamberControlService = createOpenChamberControlService({
   readSettingsFromDiskMigrated,
   sanitizeProjects,
@@ -1183,6 +1335,14 @@ const openChamberControlService = createOpenChamberControlService({
   waitForOpenCodeReady,
   sessionService: openChamberSessionService,
   scheduledTaskService,
+  browserControl: browserControlBroker,
+  agentMemoryActions: createAgentMemoryActions({
+    agentMemoryRuntime,
+    createError: (message, status) => new OpenChamberControlError(message, status),
+    onMemoryChanged: emitAgentMemoryChangedEvent,
+    isAgentMemoryEnabled,
+    resolveProjectId: resolveMemoryProjectId,
+  }),
 });
 
 const ensureGlobalWatcherStarted = async () => {
@@ -1448,7 +1608,7 @@ async function main(options = {}) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,X-Requested-With,Cache-Control,X-OpenCode-Directory,X-OpenCode-Directory-Encoding');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,X-Requested-With,Cache-Control,X-OpenCode-Directory,X-OpenCode-Directory-Encoding,Ngrok-Skip-Browser-Warning');
       res.setHeader('Access-Control-Expose-Headers', 'x-next-cursor');
       res.setHeader('Vary', 'Origin');
       if (req.method === 'OPTIONS') {
@@ -1473,6 +1633,10 @@ async function main(options = {}) {
   // runtime's active port). The pairing routes registered here only read the
   // relay candidate lazily at request time, so a late-bound holder is enough.
   let relayServiceInstance = null;
+
+  // Same pattern for the tunnel runtime: created after the base routes so
+  // /api/system/info resolves port + tunnel URL lazily at request time.
+  let tunnelRuntimeContextHolder = null;
 
   const bootstrapResult = bootstrapRuntime.setupBaseRoutes(app, {
     process,
@@ -1510,6 +1674,15 @@ async function main(options = {}) {
         apiOnly,
       };
     },
+    // Port this instance serves on and the active tunnel's public URL (if
+    // any), for /api/system/info. Resolved lazily because the tunnel runtime
+    // is created after these base routes are registered.
+    getServerPort: () => {
+      const activePort = tunnelRuntimeContextHolder?.getActivePort?.();
+      if (Number.isFinite(activePort) && activePort > 0) return activePort;
+      return Number.isFinite(port) && port > 0 ? port : null;
+    },
+    getTunnelUrl: () => tunnelRuntimeContextHolder?.tunnelService?.getPublicUrl?.() ?? null,
     verboseRequestLogs: OPENCHAMBER_VERBOSE_REQUEST_LOGS,
     uiPassword,
     tunnelAuthController,
@@ -1585,6 +1758,7 @@ async function main(options = {}) {
 
   const tunnelRuntimeContext = tunnelWiringRuntime.initialize(app, port);
   const { tunnelService, startTunnelWithNormalizedRequest } = tunnelRuntimeContext;
+  tunnelRuntimeContextHolder = tunnelRuntimeContext;
 
   // Private relay host service: config + management routes + host client
   // lifecycle. Loopback port comes from the same source the tunnel uses so
@@ -1608,15 +1782,41 @@ async function main(options = {}) {
     // Relay demand = any paired device or pending pairing session that uses the
     // relay transport. Drives the auto on/off lifecycle.
     hasRelayDemand: async () => {
-      const [pendingRelay, deviceRelay] = await Promise.all([
-        clientPairingRuntime.hasActiveRelaySession().catch(() => false),
-        remoteClientAuthRuntime.hasActiveRelayClients().catch(() => false),
+      // A store read failure must NOT masquerade as "no demand": reconcile
+      // persists enabled=false and severs paired devices. Any affirmative
+      // answer wins; otherwise a failed check aborts reconcile (throw) so the
+      // relay keeps its current state until a trustworthy read succeeds.
+      const [pendingRelay, deviceRelay] = await Promise.allSettled([
+        clientPairingRuntime.hasActiveRelaySession(),
+        remoteClientAuthRuntime.hasActiveRelayClients(),
       ]);
-      return pendingRelay || deviceRelay;
+      if (pendingRelay.status === 'fulfilled' && pendingRelay.value) return true;
+      if (deviceRelay.status === 'fulfilled' && deviceRelay.value) return true;
+      if (pendingRelay.status === 'rejected') throw pendingRelay.reason;
+      if (deviceRelay.status === 'rejected') throw deviceRelay.reason;
+      return false;
     },
   });
   relayServiceInstance = relayService;
   relayService.registerRoutes(app);
+
+  registerBrowserControlRoutes(app, { express, broker: browserControlBroker });
+
+  // One scanner backs both discovery and the tunnel allowlist, so a port the
+  // user can see is exactly a port the tunnel will dial.
+  const devServerScanner = createDevServerScanner({ spawn, platform: process.platform });
+  const listDevServers = () => devServerScanner.discover({
+    ownPorts: [port, openCodePort].filter((value) => Number.isInteger(value) && value > 0),
+  });
+
+  createDevTunnelRuntime({
+    server,
+    discoverDevServers: listDevServers,
+    uiAuthController,
+    isRequestOriginAllowed,
+    rejectWebSocketUpgrade,
+    logger: console,
+  });
 
   await featureRoutesRuntime.registerRoutes(app, {
     crypto,
@@ -1647,8 +1847,16 @@ async function main(options = {}) {
     buildOpenCodeUrl,
     getOpenCodeAuthHeaders,
     getOpenCodePort: () => openCodePort,
+    // Dev-server discovery must not offer OpenChamber's own listeners back to
+    // the user as something to preview.
+    getOwnPorts: () => [port, openCodePort].filter((value) => Number.isInteger(value) && value > 0),
+    devServerScanner,
     buildAugmentedPath,
     projectConfigRuntime,
+    projectContextRuntime,
+    agentMemoryRuntime,
+    isAgentMemoryEnabled,
+    sessionKnowledgeRuntime,
     scheduledTasksRuntime,
     scheduledTaskService,
     openChamberSessionService,
@@ -1658,20 +1866,6 @@ async function main(options = {}) {
     getOpenChamberEventClients: () => uiOpenChamberEventClients,
     writeSseEvent,
     permissionAutoAcceptRuntime,
-  });
-
-  const previewProxyRuntime = createPreviewProxyRuntime({
-    crypto,
-    URL,
-    createProxyMiddleware,
-    responseInterceptor,
-  });
-  previewProxyRuntime.attach(app, {
-    server,
-    express,
-    uiAuthController,
-    isRequestOriginAllowed,
-    rejectWebSocketUpgrade,
   });
 
   const startupPipelineResult = await startupPipelineRuntime.run({

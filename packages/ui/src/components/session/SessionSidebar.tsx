@@ -17,7 +17,6 @@ import { useUIStore } from '@/stores/useUIStore';
 import { getDeferredSafeStorage } from '@/stores/utils/safeStorage';
 import { useGitStore, useGitAllBranches, useGitRepoStatusMap } from '@/stores/useGitStore';
 import { isVSCodeRuntime } from '@/lib/desktop';
-import { Icon } from '@/components/icon/Icon';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { NewWorktreeDialog } from './NewWorktreeDialog';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
@@ -243,12 +242,14 @@ const ProjectAggregateStatusIndicator: React.FC<{ directories: Array<string | nu
     return false;
   }, [directorySet]));
 
+  // Aggregate header: dot only. A collapsed project can hold several running
+  // turns, so a single elapsed counter would have nothing to count.
   if (hasBusySession) {
     return (
-      <Icon
-        name="loader-4"
-        className="h-3 w-3 animate-spin text-primary"
+      <span
+        className="h-1.5 w-1.5 rounded-full bg-primary"
         aria-label={t('sessions.sidebar.session.status.active')}
+        title={t('sessions.sidebar.session.status.active')}
       />
     );
   }
@@ -653,9 +654,12 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
     const unsubscribe = subscribeOpenchamberEvents((event) => {
       if (event.type === 'scheduled-task-ran') {
         needsGlobalRefresh = true;
-      } else {
+      } else if (event.type === 'session-created') {
         sessionDirectories.add(event.directory);
         requestWorktreeDiscovery();
+      } else {
+        // Browser control events carry no session state; nothing to refresh.
+        return;
       }
       if (refreshTimeout) {
         clearTimeout(refreshTimeout);
@@ -827,6 +831,8 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
   const deleteSessions = useSessionUIStore((state) => state.deleteSessions);
   const archiveSession = useSessionUIStore((state) => state.archiveSession);
   const archiveSessions = useSessionUIStore((state) => state.archiveSessions);
+  const unarchiveSession = useSessionUIStore((state) => state.unarchiveSession);
+  const unarchiveSessions = useSessionUIStore((state) => state.unarchiveSessions);
 
   const {
     copiedSessionId,
@@ -839,6 +845,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
     handleCopySessionId,
     handleUnshareSession,
     handleDeleteSession,
+    handleRestoreSession,
     confirmDeleteSession,
   } = useSessionActions({
     mobileVariant,
@@ -858,6 +865,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
     deleteSessions,
     archiveSession,
     archiveSessions,
+    unarchiveSession,
     childrenMap,
     showDeletionDialog,
     setDeleteSessionConfirm,
@@ -916,6 +924,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
   const stableHandleCopySessionId = useStableRenderCallback(handleCopySessionId);
   const stableHandleUnshareSession = useStableRenderCallback(handleUnshareSession);
   const stableHandleDeleteSession = useStableRenderCallback(handleDeleteSession);
+  const stableHandleRestoreSession = useStableRenderCallback(handleRestoreSession);
   const stableCreateFolderAndStartRename = useStableRenderCallback(createFolderAndStartRename);
 
   const showMoreGroupSessions = React.useCallback((groupId: string, currentVisibleCount: number) => {
@@ -1462,12 +1471,16 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
         }
         const key = getGitHubPrStatusKey(directory, branch);
         const entry = useGitHubPrStatusStore.getState().entries[key];
-        const hasPr = Boolean(entry?.status?.pr);
+        const prState = entry?.status?.pr?.state;
+        const isTerminalPr = prState === 'closed' || prState === 'merged';
+        // Closed/merged associations are not live branch status — retry them on
+        // the same cadence as missing PRs so a newer open PR can appear.
+        const hasLivePr = Boolean(entry?.status?.pr) && !isTerminalPr;
         const retryKey = `${directory}::${branch}`;
         const noPrLastCheckedAt = Math.max(entry?.lastRefreshAt ?? 0, entry?.lastDiscoveryPollAt ?? 0);
         const shouldRetryNoPr = Boolean(
           entry?.isInitialStatusResolved
-          && !hasPr
+          && !hasLivePr
           && (
             !retriedNoPrStatusKeysRef.current.has(retryKey)
             || now - noPrLastCheckedAt >= SIDEBAR_PR_NO_PR_RETRY_MS
@@ -1579,6 +1592,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
         createFolderAndStartRename={stableCreateFolderAndStartRename}
         openContextPanelTab={openContextPanelTab}
         handleDeleteSession={stableHandleDeleteSession}
+        handleRestoreSession={stableHandleRestoreSession}
         mobileVariant={mobileVariant}
         alwaysShowActions={alwaysShowSidebarActions}
         renderSessionNode={renderSessionNode}
@@ -1752,6 +1766,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
     handleBulkCreateFolderAndMove,
     handleBulkRemoveFromFolder,
     handleBulkDelete,
+    handleBulkRestore,
     confirmBulkDelete,
   } = useSidebarBulkActions({
     isInlineEditing,
@@ -1762,6 +1777,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
     removeSessionsFromFolders,
     createFolderAndStartRename,
     archiveSessions,
+    unarchiveSessions,
     deleteSessions,
     setBulkDeleteConfirm,
   });
@@ -1816,6 +1832,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
         openNewSessionDraft={openNewSessionDraft}
         setActiveMainTab={setActiveMainTab}
         setSessionSwitcherOpen={setSessionSwitcherOpen}
+        sessionOwnerBySessionId={sessionOwnership.bySessionId}
       />
       <SessionPrefetchEffect
         enabled={isVisible}
@@ -1909,6 +1926,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
           onCreateFolderAndMove={handleBulkCreateFolderAndMove}
           onRemoveFromFolder={handleBulkRemoveFromFolder}
           canRemoveFromFolder={bulkCanRemoveFromFolder}
+          onRestore={handleBulkRestore}
           onDelete={handleBulkDelete}
           onDone={handleExitSelectionMode}
         />
