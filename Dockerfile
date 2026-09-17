@@ -26,13 +26,15 @@ RUN bun run build:web
 FROM oven/bun:1.4.2 AS runtime
 WORKDIR /home/openchamber
 
+# Instalar Node.js 22 desde NodeSource (Debian Trixie trae Node 20)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+  ca-certificates curl gnupg \
+  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y --no-install-recommends \
   bash \
-  ca-certificates \
   git \
   less \
   nodejs \
-  npm \
   openssh-client \
   python3 \
   && rm -rf /var/lib/apt/lists/*
